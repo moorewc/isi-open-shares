@@ -1,6 +1,10 @@
+const { Worker } = require('worker_threads')
 const prompts = require('prompts')
 const { ArgumentParser } = require('argparse');
-const IsilonClient = require('@moorewc/node-isilon');
+const createCsvWriter = require('csv-writer').createObjectCsvWriter;
+const IsilonClient = require('./lib/isilon');
+const { create } = require('domain');
+const path = require('path');
 
 async function GetCredentials() {
     questions = [
@@ -41,153 +45,68 @@ function GetArguments() {
     const { hostname } = GetArguments()
     const { username, password } = await GetCredentials()
 
+    openfiles = {}
+
     const isilon = new IsilonClient({
-        ssip: hostname,
+        hostname: hostname,
         username: username,
         password: password
     });
-    const axios = isilon.ssip.axios
 
-    GetShares = async ({ zone }) => {
-        const url = `/platform/11/protocols/smb/shares?zone=${zone.id}`
 
-        try {
-            const response = await axios.get(url);
-
-            return response.data.shares;
-        } catch (error) {
-            throw error;
+    WorkerCallback = async ({ hash, payload }) => {
+        if (!Object.keys(openfiles).includes(hash)) {
+            openfiles[hash] = payload;
         }
     }
 
-    GetPool = async ({ groupnet, subnet, pool }) => {
-        const url = `/platform/11/network/groupnets/${groupnet}/subnets/${subnet}/pools/${pool}`
-
-        const response = await axios.get(url)
-
-        return response.data.pools[0]
-    }
-
-    GetSubnet = async ({ groupnet, subnet }) => {
-        const url = `/platform/11/network/groupnets/${groupnet}/subnets/${subnet}`
-
-        const response = await axios.get(url)
-
-        return response.data.subnets[0]
-    }
-
-    uniqueOpenFiles = (data, key) => {
-        return [
-            ...new Map(
-                data.map(x => [key(x), x])
-            ).values()
-        ]
-    }
-
-    GetOpenFilesForShare = async ({ path }) => {
-        const url = `/platform/11/protocols/smb/openfiles`;
-
-        const response = await axios.get(url);
-
-        let openfiles = response.data.openfiles.map((f) => {
-            return {
-                file: f.file.replaceAll('\\', '/').replace('C:', ''),
-                user: f.user
-            }
-        }).filter((a) => {
-            return a.file.startsWith(path)
-        }).map((f) => {
-            return {
-                file: path,
-                user: f.user
-            }
+    CreateWorker = (config, id) => {
+        const name = 'THREAD' + (id + 1).toString().padStart(3, '0');
+        const worker = new Worker(`${__dirname}/lib/worker.js`, {
+            workerData: { config, name, id }
         });
 
-        return openfiles
-    }
+        worker.on('error', (err) => {
+            throw err;
+        });
 
-    GetAccessZonePool = async (zone) => {
-        let subnets = []
-        let pools = []
-        const url = `/platform/11/network/groupnets/${zone.groupnet}`
+        worker.on('message', WorkerCallback);
 
-        const response = await axios.get(url)
-        const groupnet = response.data.groupnets[0]
+        return worker;
+    };
 
-        for (_subnet of groupnet.subnets) {
-            const subnet = await GetSubnet({
-                groupnet: groupnet.name,
-                subnet: _subnet
-            })
-            subnets = subnets.concat(_subnet)
+    let zoneList = await isilon.GetAccessZones();
+    let nodes = await isilon.GetNodes({ zone: zoneList.filter((z) => z.name === 'System')[0] });
+    let workers = [];
 
-            for (_pool of subnet.pools) {
-                const pool = await GetPool({
-                    groupnet: groupnet.name,
-                    subnet: _subnet,
-                    pool: _pool
-                })
-                pools = pools.concat(pool)
-            }
+    for (var i = 0; i < nodes.length; i++) {
+        config = {
+            ssip: nodes[i % nodes.length],
+            username: username,
+            password: password
         }
 
-        return pools.filter((pool) => {
-            return pool.access_zone === zone.name
-        })
+        workers.push(CreateWorker(config, i));
     }
 
-    const GetAccessZones = async () => {
-        const response = await axios.get('/platform/11/zones');
-
-        return response.data.zones
-    }
-
-    let zoneList = await GetAccessZones();
-    let zones = [];
-
-    for (z of zoneList) {
-        let poolList = await GetAccessZonePool(z);
-        let shareList = await GetShares({ zone: z });
-
-        let zone = {
-            name: z.id,
-            pools: poolList.map((p) => p.sc_dns_zone),
-            shares: shareList.map((s) => {
-                return {
-                    path: s.path,
-                    name: s.name,
-                    openfiles: []
-                }
-            }).filter((s) => {
-                return !s.name.endsWith('$')
-            })
+    (loop = async () => {
+        console.log(`Scanning for open shares on ${hostname}`);
+        for (worker of workers) {
+            worker.postMessage({ cmd: 'list_open_shares' });
         }
 
-        for (share of zone.shares) {
-            share.openfiles = await GetOpenFilesForShare({ path: share.path })
-        }
+        const csvWriter = createCsvWriter({
+            header: [
+                { id: 'zone', title: 'Access Zone' },
+                { id: 'path', title: 'UNC Path' },
+                { id: 'user', title: 'User' },
+                { id: 'computer', title: 'Computer' }
+            ],
+            path: 'openshares.csv'
+        });
 
-        zones.push(zone);
-    }
+        await csvWriter.writeRecords(Object.keys(openfiles).map((k) => openfiles[k]));
 
-    open_shares = {}
-
-    for (zone of zones) {
-        for (share of zone.shares) {
-            for (file of share.openfiles) {
-                unc_path = `\\\\${zone.pools[0]}\\${share.name}`
-
-                if (!Object.keys(open_shares).includes(unc_path)) {
-                    open_shares[unc_path] = []
-                }
-
-                if (!open_shares[unc_path].includes(file.user)) {
-                    open_shares[unc_path].push(file.user)
-                }
-            }
-        }
-    }
-    for (share of Object.keys(open_shares)) {
-        console.log(share, open_shares[share].join(', '))
-    }
+        setTimeout(loop, 1000 * 60);
+    })();
 })();

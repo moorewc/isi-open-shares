@@ -2,15 +2,25 @@
   "name": "isi-open-shares",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "bin": "app.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "author": "",
+  "author": "William C. Moore",
+  "pkg": {
+    "scripts": "lib/*.js",
+    "targets": [
+      "node16-win-x64",
+      "node16-linux-x64"
+    ],
+    "outputPath": "dist"
+  },
   "license": "ISC",
   "dependencies": {
     "@moorewc/node-isilon": "^0.1.15",
     "argparse": "^2.0.1",
+    "crypto": "^1.0.1",
+    "csv-writer": "^1.6.0",
     "prompts": "^2.4.2"
   }
 }
