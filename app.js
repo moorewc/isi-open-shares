@@ -37,12 +37,13 @@ function GetArguments() {
     });
 
     parser.add_argument('--hostname', { required: true, help: 'IP Address or Hostname for System Access Zone.' })
+    parser.add_argument('--interval', '-i', { required: false, help: 'Polling Interval in seconds', default: 60 })
 
     return parser.parse_args()
 }
 
 (async () => {
-    const { hostname } = GetArguments()
+    const { hostname, interval } = GetArguments()
     const { username, password } = await GetCredentials()
 
     openfiles = {}
@@ -107,6 +108,6 @@ function GetArguments() {
 
         await csvWriter.writeRecords(Object.keys(openfiles).map((k) => openfiles[k]));
 
-        setTimeout(loop, 1000 * 60);
+        setTimeout(loop, 1000 * interval);
     })();
 })();
